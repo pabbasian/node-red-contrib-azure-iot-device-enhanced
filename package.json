@@ -1,17 +1,17 @@
 {
-  "name": "node-red-contrib-azure-iot-device",
-  "description": "Node-RED node to connect to the Azure IoT platform as a device.",
-  "version": "0.2.6",
+  "name": "node-red-contrib-azure-iot-device-enhanced",
+  "description": "Production-ready Node-RED Azure IoT Device node with enhanced reliability, infinite reconnection, and comprehensive error handling. This is a fork of the original node-red-contrib-azure-iot-device by Eric van Uum, significantly enhanced by Payman Abbasian with enterprise-grade improvements including memory leak prevention, robust reconnection logic, and comprehensive validation.",
+  "version": "0.4.4",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/iotblackbelt/node-red-contrib-azure-iot-device.git"
+    "url": "git+https://github.com/p25301/node-red-contrib-azure-iot-device.git"
   },
   "bugs": {
-    "url": "https://github.com/iotblackbelt/node-red-contrib-azure-iot-device/issues"
+    "url": "https://github.com/p25301/node-red-contrib-azure-iot-device/issues"
   },
-  "homepage": "https://github.com/iotblackbelt/noderededgemodule",
+  "homepage": "https://github.com/p25301/node-red-contrib-azure-iot-device",
   "engines": {
-    "node": ">=0.10.0"
+    "node": ">=14.0.0"
   },
   "dependencies": {
     "azure-iot-device": "^1.18.0",
@@ -31,7 +31,23 @@
     "Azure IoT",
     "Azure Iot Hub",
     "Azure IoT Central",
-    "Azure IoT Device Provisioning"
+    "Azure IoT Device Provisioning",
+    "IoT",
+    "device",
+    "telemetry",
+    "twin",
+    "direct-methods",
+    "provisioning",
+    "MQTT",
+    "AMQP",
+    "memory-leak-free",
+    "infinite-reconnection",
+    "exponential-backoff",
+    "production-ready",
+    "enterprise",
+    "robust",
+    "enhanced",
+    "fork"
   ],
   "node-red": {
     "nodes": {
@@ -39,7 +55,39 @@
     }
   },
   "author": {
-    "name": "Eric van Uum"
+    "name": "Payman Abbasian",
+    "email": "pabbasian@gmail.com"
   },
-  "license": "MIT"
+  "contributors": [
+    {
+      "name": "Eric van Uum",
+      "role": "Original Author",
+      "email": "original-author@example.com"
+    }
+  ],
+  "original": {
+    "name": "node-red-contrib-azure-iot-device",
+    "author": "Eric van Uum",
+    "url": "https://github.com/iotblackbelt/node-red-contrib-azure-iot-device"
+  },
+  "license": "MIT",
+  "files": [
+    "azureiotdevice/**/*",
+    "README.md",
+    "LICENSE",
+    "CONFIGURE.md",
+    "USE.md",
+    "DEPLOY.md",
+    "Release_notes.md",
+    "images/**/*"
+  ],
+  "scripts": {
+    "test": "mocha test/*.js --timeout 10000"
+  },
+  "devDependencies": {
+    "mocha": "^11.7.2",
+    "chai": "^4.3.10",
+    "sinon": "^17.0.1",
+    "proxyquire": "^2.1.3"
+  }
 }

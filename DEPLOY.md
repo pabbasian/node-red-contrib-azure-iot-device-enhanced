@@ -14,7 +14,7 @@ Steps to install this node:
 1. Clone this repository to a local directory on your machine running Node-RED:
 
     ```
-    git clone https://github.com/iotblackbelt/node-red-contrib-azure-iot-device.git
+    git clone https://github.com/p25301/node-red-contrib-azure-iot-device.git
     ```
     
 1. In your Node-RED user directory, typically ~/.node-red, run:
