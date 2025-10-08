@@ -4,12 +4,12 @@
   "version": "0.4.5",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/p25301/node-red-contrib-azure-iot-device.git"
+    "url": "git+https://github.com/p25301/node-red-contrib-azure-iot-device-enhanced.git"
   },
   "bugs": {
-    "url": "https://github.com/p25301/node-red-contrib-azure-iot-device/issues"
+    "url": "https://github.com/p25301/node-red-contrib-azure-iot-device-enhanced/issues"
   },
-  "homepage": "https://github.com/p25301/node-red-contrib-azure-iot-device",
+  "homepage": "https://github.com/p25301/node-red-contrib-azure-iot-device-enhanced",
   "engines": {
     "node": ">=14.0.0"
   },
