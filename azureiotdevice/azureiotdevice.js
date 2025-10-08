@@ -638,23 +638,47 @@ function getResponse(node, requestId) {
     const maxRetries = 20;
     const baseTimeout = 1000;
     let currentRetry = 0;
+    let isResolved = false;
+    let timeoutId = null;
+    
     return new Promise((resolve, reject) => {
+        // Enhanced cleanup function to prevent memory leaks
+        const cleanup = () => {
+            isResolved = true;
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+        };
+        
         const checkResponse = () => {
+            // Exit early if already resolved (prevents timeout accumulation)
+            if (isResolved) return;
+            
             const methodResponse = node.methodResponses.find(m => m.requestId === requestId);
             if (methodResponse) {
                 const index = node.methodResponses.findIndex(m => m.requestId === requestId);
                 if (index !== -1) node.methodResponses.splice(index, 1);
+                cleanup();
                 resolve(methodResponse.response);
                 return;
             }
+            
             currentRetry++;
             if (currentRetry >= maxRetries) {
+                cleanup();
                 reject(new Error(node.deviceid + ' -> Method Response timeout after ' + maxRetries + ' retries'));
                 return;
             }
+            
+            // Exit early if already resolved (prevents timeout scheduling)
+            if (isResolved) return;
+            
             const delay = baseTimeout * Math.min(currentRetry, 10);
-            setTimeout(checkResponse, delay);
+            timeoutId = setTimeout(checkResponse, delay);
         };
+        
+        // Start the first check immediately
         checkResponse();
     });
 }
