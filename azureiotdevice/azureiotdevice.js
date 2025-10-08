@@ -88,6 +88,9 @@ function register(RED) {
         node._lastConnected = null;
         node._handlersRegistered = false;
         node._closing = false;
+        node._reconnectTimeout = null;
+        node._responseCleanupInterval = null;
+        node._retries = 0;
         setStatus(node, statusEnum.disconnected);
         initiateDevice(node);
     }
@@ -129,6 +132,124 @@ function register(RED) {
             .digest('base64');
     };
     
+    // Setup client listeners to prevent accumulation
+    function setupClientListeners(node) {
+        if (!node.client) return;
+        
+        // Remove all existing listeners to prevent accumulation
+        node.client.removeAllListeners();
+        
+        // Add error listener
+        node.client.on('error', function (err) {
+            error(node, err, node.deviceid + ' -> Device Client error.');
+            setStatus(node, statusEnum.error);
+        });
+        
+        // Add disconnect listener
+        node.client.on('disconnect', function (err) {
+            error(node, err, node.deviceid + ' -> Device Client disconnected.');
+            setStatus(node, statusEnum.disconnected);
+            
+            // Prevent reconnection attempts if node is closing
+            if (node._closing) {
+                return;
+            }
+            
+            // Clean up current connection but preserve node-level handlers
+            if (node.client) {
+                try {
+                    node.client.removeAllListeners();
+                } catch (err) {}
+                node.client = null;
+            }
+            if (node.twin) {
+                try {
+                    node.twin.removeAllListeners();
+                } catch (err) {}
+                node.twin = null;
+            }
+            
+            // Add exponential backoff for reconnection (with retry limit)
+            node._retries = (node._retries || 0) + 1;
+            if (node._retries > 100) {
+                node.log(node.deviceid + ' -> Max retries reached, stopping reconnection attempts');
+                setStatus(node, statusEnum.error);
+                return;
+            }
+            
+            const retryDelay = Math.min(1000 * Math.pow(2, node._retries), 30000);
+            node.log(node.deviceid + ' -> Reconnecting in ' + retryDelay + 'ms (attempt ' + node._retries + ')');
+            if (node._reconnectTimeout) clearTimeout(node._reconnectTimeout);
+            node._reconnectTimeout = setTimeout(() => {
+                if (!node._closing) {
+                    // Use connectDevice instead of initiateDevice to avoid recursive listener setup
+                    provisionDevice(node).then(result => {
+                        if (result) {
+                            connectDevice(node, result).then(result => {
+                                if (result === null) {
+                                    retrieveTwin(node).then(result => {
+                                        node.log(node.deviceid + ' -> Device twin retrieved.');
+                                    }).catch(function (err) {
+                                        error(node, err, node.deviceid + ' -> Retrieving device twin failed');
+                                    });
+                                }
+                            }).catch(function(err) {
+                                error(node, err, node.deviceid + ' -> Device connection failed');
+                            });
+                        }
+                    }).catch(function(err) {
+                        error(node, err, node.deviceid + ' -> Device provisioning failed.');
+                    });
+                }
+            }, retryDelay);
+        });
+        
+        // Add method listeners
+        if (node.methods) {
+            for (let method in node.methods) {
+                const mthd = node.methods[method].name;
+                node.client.onDeviceMethod(mthd, function(request, response) {
+                    node.log(node.deviceid + ' -> Command received: ' + request.methodName);
+                    node.log(node.deviceid + ' -> Command payload: ' + JSON.stringify(request.payload));
+                    node.send({payload: request, topic: "command", deviceId: node.deviceid});
+                    getResponse(node, request.requestId).then(message => {
+                        var rspns = message.payload;
+                        node.log(node.deviceid + ' -> Method response status: ' + rspns.status);
+                        node.log(node.deviceid + ' -> Method response payload: ' + JSON.stringify(rspns.payload));
+                        response.send(rspns.status, rspns.payload, function(err) {
+                            if (err) {
+                                node.log(node.deviceid + ' -> Failed sending method response: ' + err);
+                            } else {
+                                node.log(node.deviceid + ' -> Successfully sent method response: ' + request.methodName);
+                            }
+                        });
+                    })
+                    .catch(function(err){
+                        error(node, err, node.deviceid + ' -> Failed sending method response: \"' + request.methodName + '\".');
+                    });
+                });
+            }
+        }
+        
+        // Add message listener
+        node.client.on('message', function (msg) {
+            node.log(node.deviceid + ' -> C2D message received, data: ' + msg.data);
+            var message = {
+                messageId: msg.messageId,
+                data: msg.data.toString('utf8'),
+                properties: msg.properties
+            };
+            node.send({payload: message, topic: "message", deviceId: node.deviceid});
+            node.client.complete(msg, function (err) {
+                if (err) {
+                    error(node, err, node.deviceid + ' -> C2D Message complete error.');
+                } else {
+                    node.log(node.deviceid + ' -> C2D Message completed.');
+                }
+            });
+        });
+    }
+
     // Close all listeners and clean up
     function closeAll(node) {
         node.log(node.deviceid + ' -> Closing all clients.');
@@ -142,6 +263,12 @@ function register(RED) {
             node._healthCheckInterval = null;
         }
         
+        // Clear response cleanup interval
+        if (node._responseCleanupInterval) {
+            clearInterval(node._responseCleanupInterval);
+            node._responseCleanupInterval = null;
+        }
+        
         // Clear reconnect timeout
         if (node._reconnectTimeout) {
             clearTimeout(node._reconnectTimeout);
@@ -149,7 +276,7 @@ function register(RED) {
         }
         
         // Clear methodResponses
-        if (node.methodResponses) node.methodResponses.length = 0;
+        node.methodResponses = [];
         // Remove listeners from twin
         if (node.twin) {
             try {
@@ -161,37 +288,27 @@ function register(RED) {
         // Remove listeners from client
         if (node.client) {
             try {
-                node.client.removeAllListeners && node.client.removeAllListeners('error');
-                node.client.removeAllListeners && node.client.removeAllListeners('disconnect');
-                node.client.removeAllListeners && node.client.removeAllListeners('message');
-                if (node.methods) {
-                    for (let method in node.methods) {
-                        try {
-                            node.client.removeAllListeners(node.methods[method].name);
-                        } catch (err) {}
-                    }
-                }
-                // Close client with timeout fallback
-                let closed = false;
-                const closeTimeout = setTimeout(() => {
-                    if (!closed) {
-                        node.log(node.deviceid + ' -> Client close timeout, forcing cleanup');
-                        node.client = null;
-                    }
-                }, 3000);
-                node.client.close((err, result) => {
-                    closed = true;
-                    clearTimeout(closeTimeout);
-                    if (err) {
-                        node.log(node.deviceid + ' -> Azure IoT Device Client close failed: ' + JSON.stringify(err));
-                    } else {
-                        node.log(node.deviceid + ' -> Azure IoT Device Client closed.');
-                    }
+                node.client.removeAllListeners && node.client.removeAllListeners();
+            } catch (err) {}
+            
+            let closed = false;
+            const closeTimeout = setTimeout(() => {
+                if (!closed) {
+                    node.log(node.deviceid + ' -> Client close timeout, forcing cleanup');
                     node.client = null;
-                });
-            } catch (err) {
+                }
+            }, 3000);
+            
+            node.client.close((err, result) => {
+                closed = true;
+                clearTimeout(closeTimeout);
+                if (err) {
+                    node.log(node.deviceid + ' -> Azure IoT Device Client close failed: ' + JSON.stringify(err));
+                } else {
+                    node.log(node.deviceid + ' -> Azure IoT Device Client closed.');
+                }
                 node.client = null;
-            }
+            });
         }
     }
 
@@ -244,7 +361,6 @@ function register(RED) {
                             node.log(node.deviceid + ' -> Device twin retrieved.');
                         }).catch( function (err) {
                             error(node, err, node.deviceid + ' -> Retrieving device twin failed');
-                            throw new Error(err);
                         });
                     } else {
                         throw new Error(result);
@@ -384,86 +500,9 @@ function register(RED) {
         return new Promise((resolve,reject) => {
             node.client.setOptions(options).then( result => {
                 node.client.open().then( result => {                    
-                    node.client.on('error', function (err) {
-                        error(node, err, node.deviceid + ' -> Device Client error.');
-                        setStatus(node, statusEnum.error);
-                    });
-                    // Robust disconnect handler with exponential backoff and no event leak
-                    node.client.on('disconnect', function (err) {
-                        error(node, err, node.deviceid + ' -> Device Client disconnected.');
-                        setStatus(node, statusEnum.disconnected);
-                        
-                        // Prevent reconnection attempts if node is closing
-                        if (node._closing) {
-                            return;
-                        }
-                        
-                        // Clean up current connection but preserve node-level handlers
-                        if (node.client) {
-                            try {
-                                node.client.removeAllListeners();
-                            } catch (err) {}
-                            node.client = null;
-                        }
-                        if (node.twin) {
-                            try {
-                                node.twin.removeAllListeners();
-                            } catch (err) {}
-                            node.twin = null;
-                        }
-                        
-                        // Add exponential backoff for reconnection (infinite retries)
-                        node._retries = (node._retries || 0) + 1;
-                        const retryDelay = Math.min(1000 * Math.pow(2, node._retries), 30000);
-                        node.log(node.deviceid + ' -> Reconnecting in ' + retryDelay + 'ms (attempt ' + node._retries + ')');
-                        if (node._reconnectTimeout) clearTimeout(node._reconnectTimeout);
-                        node._reconnectTimeout = setTimeout(() => {
-                            if (!node._closing) {
-                                initiateDevice(node);
-                            }
-                        }, retryDelay);
-                    });
-                    for (let method in node.methods) {
-                        node.log(node.deviceid + ' -> Adding synchronous command: ' + node.methods[method].name);
-                        var mthd = node.methods[method].name;
-                        node.client.onDeviceMethod(mthd, function(request, response) {
-                            node.log(node.deviceid + ' -> Command received: ' + request.methodName);
-                            node.log(node.deviceid + ' -> Command payload: ' + JSON.stringify(request.payload));
-                            node.send({payload: request, topic: "command", deviceId: node.deviceid});
-                            getResponse(node, request.requestId).then( message => {
-                                var rspns = message.payload;
-                                node.log(node.deviceid + ' -> Method response status: ' + rspns.status);
-                                node.log(node.deviceid + ' -> Method response payload: ' + JSON.stringify(rspns.payload));
-                                response.send(rspns.status, rspns.payload, function(err) {
-                                    if (err) {
-                                    node.log(node.deviceid + ' -> Failed sending method response: ' + err);
-                                    } else {
-                                    node.log(node.deviceid + ' -> Successfully sent method response: ' + request.methodName);
-                                    }
-                                });
-                            })
-                            .catch( function(err){
-                                error(node, err, node.deviceid + ' -> Failed sending method response: \"' + request.methodName + '\".');
-                            });
-                        });
-                    }
-                    node.log(node.deviceid + ' -> Listening to C2D messages');
-                    node.client.on('message', function (msg) {
-                        node.log(node.deviceid + ' -> C2D message received, data: ' + msg.data);
-                        var message = {
-                            messageId: msg.messageId,
-                            data: msg.data.toString('utf8'),
-                            properties: msg.properties
-                        };
-                        node.send({payload: message, topic: "message", deviceId: node.deviceid});
-                        node.client.complete(msg, function (err) {
-                            if (err) {
-                                error(node, err, node.deviceid + ' -> C2D Message complete error.');
-                            } else {
-                                node.log(node.deviceid + ' -> C2D Message completed.');
-                            }
-                        });
-                    });
+                    // Setup listeners properly to prevent accumulation
+                    setupClientListeners(node);
+                    
                     node.log(node.deviceid + ' -> Device client connected.');
                     // Reset retry counter on successful connection
                     node._retries = 0;
@@ -498,6 +537,9 @@ function register(RED) {
                 msg.payload = JSON.parse(JSON.stringify(node.twin.properties));
                 node.send(msg);
                 
+                // Remove existing twin listeners first to prevent accumulation
+                node.twin.removeAllListeners && node.twin.removeAllListeners('properties.desired');
+                
                 // Get the desired properties
                 node.twin.on('properties.desired', function(payload) {
                     node.log(node.deviceid + ' -> Desired properties received: ' + JSON.stringify(payload));
@@ -507,6 +549,7 @@ function register(RED) {
                     msg.payload = payload;
                     node.send(msg);
                 });
+                resolve();
             }).catch(err => {
                 error(node, err, node.deviceid + ' -> Device twin retrieve failed.');
                 reject(err);
@@ -568,12 +611,25 @@ function register(RED) {
 
     // Send device direct method response.
     function sendMethodResponse(node, message) {
-        // Push the reponse to the array
+        // Push the reponse to the array with timestamp for cleanup
         var methodResponse = message.payload;
         node.log(node.deviceid + ' -> Creating response for command: ' + methodResponse.methodName);
-        node.methodResponses.push(
-            {requestId: methodResponse.requestId, response: message}
-        );
+        node.methodResponses.push({
+            requestId: methodResponse.requestId, 
+            response: message,
+            timestamp: Date.now()
+        });
+        
+        // Start response cleanup interval if not already started
+        if (!node._responseCleanupInterval) {
+            node._responseCleanupInterval = setInterval(() => {
+                const now = Date.now();
+                // Remove responses older than 5 minutes
+                node.methodResponses = node.methodResponses.filter(response => {
+                    return (now - response.timestamp) < 300000; // 5 minutes
+                });
+            }, 60000); // Check every minute
+        }
     };
 
 
